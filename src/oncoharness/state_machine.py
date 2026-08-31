@@ -21,6 +21,9 @@ Inference stack v1 (T-4.3):
   never proposed, and an unexplained blind-spot hit blocks a clean negative.
 - Conformal deferral (axiom A13): an ambiguous or empty Mondrian prediction
   set overrides a confident-sounding decision with deferral.
+- Cost telemetry (U1: E1): ``run_case`` brackets the toolbelt's CostMeter, so
+  every report carries the case's cost block — tool calls, pixels, wall time,
+  LLM spend — into the ledger's ``claim`` entry.
 """
 
 from __future__ import annotations
@@ -299,6 +302,9 @@ class HarnessPipeline:
 
     # -- the whole case --------------------------------------------------
     def run_case(self, case_id: str, pixels: np.ndarray, pixel_spacing_mm=(0.1, 0.1)) -> CaseReport:
+        meter = getattr(self.tools, "meter", None)
+        if meter is not None:
+            meter.start_case(case_id)
         info = self.tools.store.put(pixels, kind="image", meta={"case_id": case_id})
         qc = self.preflight_qc(pixels)
         if qc == QCVerdict.inadequate_defer:
@@ -308,6 +314,7 @@ class HarnessPipeline:
             return CaseReport(
                 case_id=case_id, qc=qc, findings=[], decision=CaseDecision.defer_to_human,
                 score=0.5, disagreement_rate=1.0, deferral_reason="preflight QC",
+                cost=meter.finish_case().as_dict() if meter is not None else None,
             )
 
         detect = self.tools.call("run_detector", image_handle=info.handle)
@@ -407,6 +414,7 @@ class HarnessPipeline:
                 else ""
             ),
             evidence_refs=[detect["evidence_ref"]],
+            cost=meter.finish_case().as_dict() if meter is not None else None,
         )
         self.tools.ledger.append("claim", report.model_dump(mode="json"))
         return report

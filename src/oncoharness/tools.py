@@ -6,11 +6,16 @@ ledger, and every numeric fact downstream must cite one of those entries.
 
 Registry is deny-by-default: only tools registered here are callable, whether
 invoked by the deterministic state machine or exposed to the LLM over MCP.
+
+Every call is also metered (U1: E1): the belt times the tool body and counts
+detector pixels into the case's :class:`~oncoharness.telemetry.CostMeter`.
+The meter is code-side only — deliberately not a registered tool (S8).
 """
 
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -20,6 +25,7 @@ from .reference.detector import DoGBlobDetector
 from .reference.features import embed_crop
 from .ledger import EvidenceLedger
 from .store import ArtifactStore
+from .telemetry import CostMeter
 
 
 class Toolbelt:
@@ -33,9 +39,11 @@ class Toolbelt:
         criteria_path: str | Path | None = None,
         detector: DoGBlobDetector | None = None,
         gate_rules_path: str | Path = "gates/gate_rules.yaml",
+        meter: CostMeter | None = None,
     ) -> None:
         self.store = store
         self.ledger = ledger
+        self.meter = meter if meter is not None else CostMeter()
         self.detector = detector or DoGBlobDetector()
         # A second, differently-parameterized family for blind-spot re-search
         # (axiom A5): tuned to a different scale band and a lower floor.
@@ -67,12 +75,37 @@ class Toolbelt:
         if tool_name not in self._registry:
             raise PermissionError(f"tool {tool_name!r} is not in the allowlist")
         call_ref = self.ledger.append("tool_call", {"tool": tool_name, "args": _safe(kwargs)})
-        result = self._registry[tool_name](**kwargs)
+        t0 = time.perf_counter()
+        ok = False
+        try:
+            result = self._registry[tool_name](**kwargs)
+            ok = True
+        finally:
+            # Metered even on failure, so cost.tool_calls always equals the
+            # ledger's tool_call entries for the case (U1 invariant).
+            self.meter.record_tool(
+                tool_name,
+                (time.perf_counter() - t0) * 1000.0,
+                pixels=self._detector_pixels(tool_name, kwargs) if ok else 0,
+            )
         result_ref = self.ledger.append(
             "tool_result", {"tool": tool_name, "call_ref": call_ref, "result": _safe(result)}
         )
         result["evidence_ref"] = result_ref
         return result
+
+    def _detector_pixels(self, tool_name: str, kwargs: dict) -> int:
+        """Detector input pixels (E1): h*w from the manifest, no pixel load."""
+        if tool_name != "run_detector":
+            return 0
+        try:
+            shape = self.store.info(kwargs["image_handle"]).shape
+        except Exception:
+            return 0
+        pixels = 1
+        for dim in shape:
+            pixels *= int(dim)
+        return pixels
 
     # -- tools -----------------------------------------------------------
     def describe_store(self) -> dict:

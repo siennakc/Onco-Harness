@@ -4,6 +4,10 @@ AUROC for selection; sensitivity at fixed specificity for release; partial AUC
 in the high-specificity region; adaptive-bin ECE + Brier for calibration;
 patient-level clustered bootstrap for uncertainty. Validated against known
 closed-form cases in tests before any model work (T-1.4).
+
+Efficiency doctrine (U1: E2): ``efficiency_summary`` divides the release
+metric by what it cost to earn — accuracy per unit cost is what the
+improvement loop must move, not accuracy alone.
 """
 
 from __future__ import annotations
@@ -53,6 +57,41 @@ def sensitivity_at_specificity(
     threshold = neg[k - 1]
     pos = scores[y_true == 1]
     return float((pos > threshold).mean())
+
+
+def efficiency_summary(
+    y_true: np.ndarray, scores: np.ndarray, costs: list[dict]
+) -> dict:
+    """Accuracy per unit cost (U1: E2): what one point of sensitivity costs.
+
+    ``costs`` holds per-case cost blocks (``CaseCost.as_dict()`` /
+    ``CaseReport.cost``). Returns sens@96%spec alongside its per-1k-tool-call,
+    per-USD, and per-minute quotients. A zero denominator yields ``None``,
+    never a fake infinity — an unmeasured cost is not a free one.
+    """
+    costs = [c.as_dict() if hasattr(c, "as_dict") else (c or {}) for c in costs]
+    sens = sensitivity_at_specificity(y_true, scores, 0.96)
+    tool_calls = float(
+        sum(
+            c.get("total_tool_calls", sum(c.get("tool_calls", {}).values()))
+            for c in costs
+        )
+    )
+    usd = float(sum(c.get("llm_usd", 0.0) for c in costs))
+    minutes = float(sum(c.get("wall_ms", 0.0) for c in costs)) / 60000.0
+
+    def per(denominator: float) -> float | None:
+        return round(float(sens / denominator), 4) if denominator > 0 else None
+
+    return {
+        "sens_at_96_spec": round(float(sens), 4),
+        "total_tool_calls": int(tool_calls),
+        "total_llm_usd": round(usd, 6),
+        "total_wall_minutes": round(minutes, 4),
+        "sens_per_1k_tool_calls": per(tool_calls / 1000.0),
+        "sens_per_usd": per(usd),
+        "sens_per_minute": per(minutes),
+    }
 
 
 def partial_auc(
