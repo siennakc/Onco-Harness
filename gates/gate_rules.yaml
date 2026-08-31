@@ -1,0 +1,41 @@
+# PROTECTED PATH (T-3.3).
+# In deployment this directory is owned by a different service account than
+# the harness runtime: the agent and the self-improvement loop must have NO
+# write access here (axiom: self-improving, never self-certifying).
+# CI enforces that no harness code path writes under gates/.
+
+version: 1
+
+primary:
+  metric: sensitivity_at_specificity
+  specificity: 0.96
+  # Candidate must be non-inferior to champion within margin, on paired
+  # patient-level clustered bootstrap.
+  non_inferiority_margin: 0.02
+  bootstrap_iterations: 2000
+  alpha: 0.05
+
+subgroup_floors:
+  # Registered subgroups: non-inferiority per slice with a worst-slice floor.
+  min_slice_size: 30
+  worst_slice_margin: 0.05
+  registered_subgroups: [site, density_band, age_band]
+
+calibration:
+  max_ece_adaptive: 0.05
+
+regression:
+  # Negative-flip gate: cases the champion got right that the candidate misses.
+  max_negative_flip_rate: 0.02
+
+determinism:
+  # Double-run agreement on identical inputs.
+  required_agreement: 1.0
+
+image_dependence:
+  # Image-ablated control: accuracy with images removed must drop by at least
+  # this much, or the model is context-guessing, not seeing.
+  min_accuracy_drop: 0.10
+
+deferral:
+  max_rate_increase: 0.03
