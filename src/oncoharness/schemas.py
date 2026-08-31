@@ -58,6 +58,13 @@ class CaseReport(BaseModel):
     )
     deferral_reason: str = ""
     evidence_refs: list[str] = Field(default_factory=list)
+    cost: dict | None = Field(
+        default=None,
+        description=(
+            "per-case efficiency telemetry (CaseCost.as_dict()); "
+            "measured by code, never authored by the LLM"
+        ),
+    )
 
 
 class AdjudicationRequest(BaseModel):
