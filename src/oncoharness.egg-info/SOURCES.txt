@@ -1,3 +1,4 @@
+README.md
 pyproject.toml
 src/oncoharness/__init__.py
 src/oncoharness/ablation.py
@@ -24,6 +25,7 @@ src/oncoharness/reference/features.py
 src/oncoharness/reference/head.py
 src/oncoharness/reference/registration.py
 tests/test_conformal.py
+tests/test_gate.py
 tests/test_inference_stack_v1.py
 tests/test_ledger_store_tools.py
 tests/test_new_tools.py

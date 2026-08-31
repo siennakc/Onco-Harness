@@ -49,6 +49,11 @@ class CaseDecision(str, Enum):
 
 class CaseReport(BaseModel):
     case_id: str
+    policy_id: str = Field(
+        default="",
+        description="registry id of the policy that produced this report (U4/S2); "
+        "empty only for unregistered ad-hoc pipelines",
+    )
     qc: QCVerdict
     findings: list[Finding] = Field(default_factory=list)
     decision: CaseDecision

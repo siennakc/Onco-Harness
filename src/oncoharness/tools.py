@@ -40,6 +40,7 @@ class Toolbelt:
         detector: DoGBlobDetector | None = None,
         gate_rules_path: str | Path = "gates/gate_rules.yaml",
         meter: CostMeter | None = None,
+        gate_audit_path: str | Path = "runs/gate_audit.jsonl",
     ) -> None:
         self.store = store
         self.ledger = ledger
@@ -56,6 +57,7 @@ class Toolbelt:
         self.atlas_path = Path(atlas_path) if atlas_path else None
         self.criteria_path = Path(criteria_path) if criteria_path else None
         self.gate_rules_path = Path(gate_rules_path)
+        self.gate_audit_path = Path(gate_audit_path)
         self._registry: dict[str, Callable[..., dict]] = {
             "describe_store": self.describe_store,
             "run_detector": self.run_detector,
@@ -298,8 +300,16 @@ class Toolbelt:
         Read-only over ``gates/`` (the harness can execute the gate, never
         edit its rules). The results file is produced by a batch evaluation
         run, so no score in it was authored by a model's text output.
+
+        Optional keys in the results file: ``cand_costs``/``champ_costs``
+        (per-case cost dicts, U8 efficiency floor) and ``policy_id``. When
+        a ``policy_id`` is present, the evaluation is counted in the
+        hash-chained proposal audit (S3 accounting) — the caller triggers
+        that entry but never authors it: its contents come solely from the
+        gate result computed here.
         """
         from .gate import load_rules, run_gate
+        from .sequential import CaseCost, ProposalAudit
 
         data = json.loads(Path(results_path).read_text())
         rules = load_rules(self.gate_rules_path)
@@ -315,7 +325,20 @@ class Toolbelt:
                 if data.get("candidate_scores_rerun")
                 else None
             ),
+            cand_costs=(
+                [CaseCost(**c) for c in data["cand_costs"]] if data.get("cand_costs") else None
+            ),
+            champ_costs=(
+                [CaseCost(**c) for c in data["champ_costs"]] if data.get("champ_costs") else None
+            ),
         )
+        if data.get("policy_id"):
+            ProposalAudit(self.gate_audit_path).log(
+                policy_id=str(data["policy_id"]),
+                gate_passed=result.passed,
+                e_value=None,
+                checks={c.name: c.passed for c in result.checks},
+            )
         return {"passed": result.passed, "summary": result.summary()}
 
     def submit_review(self, case_id: str, reason: str, ranked_regions: list[dict]) -> dict:

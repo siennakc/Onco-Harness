@@ -39,3 +39,23 @@ image_dependence:
 
 deferral:
   max_rate_increase: 0.03
+
+failure_bank:
+  # Regression replay over the confirmed failure bank (U5): a confirmed
+  # record the champion passed may never fail under a candidate. Probation
+  # records never gate (mined FPs may be unreported cancers).
+  max_confirmed_regressions: 0
+
+efficiency:
+  # Efficiency floors (U8): accuracy gates alone reward compute inflation.
+  # Candidate mean $/case and tool-calls/case vs champion, hard ratios.
+  max_cost_ratio_vs_champion: 1.10
+  max_tool_calls_ratio: 1.10
+
+sequential:
+  # Anytime-valid acceptance for the nightly loop (U8): the e-process must
+  # reach 1/alpha within the trial budget; unlimited looks stay valid.
+  # An e-process configured looser than these values is refused outright.
+  alpha: 0.05
+  margin: 0.02
+  max_cases_per_trial: 2000

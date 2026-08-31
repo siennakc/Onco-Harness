@@ -55,12 +55,31 @@ def run_gate(
     patient_ids: list[str],
     subgroups: dict[str, list[str]] | None = None,
     candidate_scores_rerun: np.ndarray | None = None,
+    failure_bank_report=None,
+    champion_bank_vector: dict[str, bool] | None = None,
+    cand_costs=None,
+    champ_costs=None,
+    eprocess=None,
 ) -> GateResult:
     """Evaluate the conjunctive gate.
 
     ``subgroups`` maps subgroup-attribute name -> per-case values (e.g. site).
     ``candidate_scores_rerun`` is a second run on identical inputs for the
     determinism check.
+
+    Optional, additively keyed inputs (checks appear only when supplied, so
+    older callers and rule files evaluate exactly as before):
+
+    - ``failure_bank_report``: a :class:`~oncoharness.failure_bank.BankReport`
+      from replaying the bank under the candidate; gated against
+      ``champion_bank_vector`` (the champion's pass vector) with
+      ``rules["failure_bank"]["max_confirmed_regressions"]`` (default 0).
+    - ``cand_costs``/``champ_costs``: per-case :class:`~oncoharness.sequential.CaseCost`
+      lists for the efficiency floor (needs the ``efficiency`` rules key).
+    - ``eprocess``: a running :class:`~oncoharness.sequential.EProcessNonInferiority`
+      for batched nightly evaluation (needs the ``sequential`` rules key);
+      the classic one-shot bootstrap path above remains for single
+      evaluations.
     """
     result = GateResult()
     y_true = np.asarray(y_true)
@@ -162,5 +181,30 @@ def run_gate(
                 detail=f"agreement {agreement:.4f} >= {required}",
             )
         )
+
+    # 6. Failure-bank regression (U5): a confirmed record the champion
+    # passed must not fail under the candidate — the ratchet's teeth.
+    if failure_bank_report is not None:
+        from .failure_bank import gate_check_failure_bank
+
+        max_reg = int(rules.get("failure_bank", {}).get("max_confirmed_regressions", 0))
+        result.checks.append(
+            gate_check_failure_bank(
+                failure_bank_report, champion_bank_vector or {}, max_reg
+            )
+        )
+
+    # 7. Efficiency floors (U8/S4): "improved" must never mean "spent 10x".
+    if cand_costs is not None and champ_costs is not None and "efficiency" in rules:
+        from .sequential import gate_check_efficiency
+
+        result.checks.append(gate_check_efficiency(cand_costs, champ_costs, rules))
+
+    # 8. Sequential anytime-valid acceptance (U8/S3): under repeated nightly
+    # proposals, only an e-process crossing 1/alpha certifies promotion.
+    if eprocess is not None and "sequential" in rules:
+        from .sequential import gate_check_sequential
+
+        result.checks.append(gate_check_sequential(eprocess, rules))
 
     return result

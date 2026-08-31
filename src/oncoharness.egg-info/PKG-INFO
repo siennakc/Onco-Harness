@@ -13,3 +13,80 @@ Provides-Extra: agent
 Requires-Dist: claude-agent-sdk>=0.1.0; extra == "agent"
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0; extra == "dev"
+
+# OncoHarness
+
+The harness lane of the Oncoscope project: a **gated, self-improving LLM harness**
+that orchestrates vision models for cancer detection — designed to get measurably
+better every cycle **without fooling itself**.
+
+> **Not a medical device.** Research software only. No output of this system may
+> be used for diagnosis, screening, or treatment decisions.
+
+Extracted from [siennakc/cancer-vm](https://github.com/siennakc/cancer-vm)
+(`oncoscope.harness` + gate machinery, commit `4ce701d`). The model/data lane —
+real mammography ingestion, trained encoders, sealed internal test, external
+MIAS benchmark — stays in cancer-vm and plugs in behind this repo's protocols.
+
+## Architecture
+
+A **deterministic state machine** (`ingest → preflight QC → detect → TTA verify →
+zoom re-verify → FP/FN hunt → aggregate → adjudicate → conformal deferral →
+report`) drives every case. Specialist **detectors propose** at high sensitivity;
+the **LLM adjudicates at exactly one node** — it plans, weighs verified evidence,
+and decides recall / no-recall / defer, but it **never sees pixels and never
+authors a number**. Images live in a handle-passing **artifact store**; every tool
+call and claim lands in an append-only, hash-chained **evidence ledger**; every
+promotion must pass a conjunctive **eval gate** whose rules live in a path the
+harness cannot write (CI carries an immutability canary over `gates/`).
+
+## Layout
+
+| module | contents |
+|---|---|
+| `state_machine.py` | the outer loop; LLM only at the adjudication node |
+| `tools.py` | the toolbelt (detect, crop, measure, compare, gate, …) — deny-by-default allowlist |
+| `ledger.py` / `store.py` | hash-chained evidence ledger; handle-passing artifact store |
+| `agent.py` | Claude Agent SDK adjudicator (in-process MCP, built-ins stripped) |
+| `gate.py` + `gates/` | conjunctive PASS/FAIL promotion gate; protected rules |
+| `conformal.py` | Mondrian conformal deferral |
+| `ablation.py` | harness-vs-detector-alone A/B runner |
+| `splits.py` / `leakage.py` | patient-grouped splits + leakage audit (axiom A9) |
+| `reference/` | pure-numpy reference detector/encoder/head for tests & protocols |
+| `phantom.py` | synthetic phantom generator — full test suite runs with no data, no GPU |
+
+Design axioms and the full technique catalog: [TASKSHEET.md](TASKSHEET.md).
+Threat model and PHI boundary: [THREAT_MODEL.md](THREAT_MODEL.md).
+
+## Quickstart
+
+```sh
+python3.12 -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/python -m pytest        # 27 tests, seconds, no data, no GPU
+```
+
+Run the pipeline on a synthetic phantom:
+
+```sh
+.venv/bin/python - <<'PY'
+from oncoharness.phantom import generate_dataset
+from oncoharness.ledger import EvidenceLedger
+from oncoharness.state_machine import HarnessPipeline
+from oncoharness.store import ArtifactStore
+from oncoharness.tools import Toolbelt
+
+case = next(c for c in generate_dataset() if c.label == 1)
+pipeline = HarnessPipeline(Toolbelt(ArtifactStore("runs/demo/artifacts"),
+                                    EvidenceLedger("runs/demo/ledger.jsonl")))
+print(pipeline.run_case(case.case_id, case.pixels).model_dump_json(indent=1))
+PY
+```
+
+## Non-negotiables
+
+- The LLM never authors pixels, coordinates, or numbers (A3).
+- Generator and checker are independent; verification is symmetric (A4, A5).
+- Abstention is a first-class output; deferral ships evidence (A13).
+- The harness can never write its own gates — **self-improving, never
+  self-certifying**.
