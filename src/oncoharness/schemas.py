@@ -55,6 +55,10 @@ class CaseReport(BaseModel):
         "empty only for unregistered ad-hoc pipelines",
     )
     qc: QCVerdict
+    lane: str = Field(
+        default="",
+        description="difficulty lane the router assigned (U2); empty for unrouted pipelines",
+    )
     findings: list[Finding] = Field(default_factory=list)
     decision: CaseDecision
     score: float = Field(ge=0.0, le=1.0, description="calibrated case-level suspicion")
