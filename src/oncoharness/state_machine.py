@@ -118,6 +118,7 @@ class HarnessPipeline:
         max_zoom_crops: int = 8,
         fp_max_aspect_ratio: float = 3.0,
         blindspot_min_score: float = 0.55,
+        policy_id: str = "",
     ) -> None:
         self.tools = toolbelt
         self.adjudicator = adjudicator or RuleBasedAdjudicator()
@@ -130,6 +131,10 @@ class HarnessPipeline:
         self.max_zoom_crops = max_zoom_crops
         self.fp_max_aspect_ratio = fp_max_aspect_ratio
         self.blindspot_min_score = blindspot_min_score
+        # Which registered policy this pipeline embodies (U4/S2): stamped on
+        # every CaseReport so A/B arms, bank replays, and incident forensics
+        # stay attributable. Empty for ad-hoc, unregistered pipelines.
+        self.policy_id = policy_id
 
     # -- stages ----------------------------------------------------------
     def preflight_qc(self, pixels: np.ndarray) -> QCVerdict:
@@ -306,7 +311,8 @@ class HarnessPipeline:
                 "submit_review", case_id=case_id, reason="failed preflight QC", ranked_regions=[]
             )
             return CaseReport(
-                case_id=case_id, qc=qc, findings=[], decision=CaseDecision.defer_to_human,
+                case_id=case_id, policy_id=self.policy_id, qc=qc, findings=[],
+                decision=CaseDecision.defer_to_human,
                 score=0.5, disagreement_rate=1.0, deferral_reason="preflight QC",
             )
 
@@ -396,6 +402,7 @@ class HarnessPipeline:
 
         report = CaseReport(
             case_id=case_id,
+            policy_id=self.policy_id,
             qc=qc,
             findings=findings,
             decision=adjudication.decision,
