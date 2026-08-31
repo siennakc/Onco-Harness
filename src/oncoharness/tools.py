@@ -10,6 +10,14 @@ invoked by the deterministic state machine or exposed to the LLM over MCP.
 Every call is also metered (U1: E1): the belt times the tool body and counts
 detector pixels into the case's :class:`~oncoharness.telemetry.CostMeter`.
 The meter is code-side only — deliberately not a registered tool (S8).
+
+With a :class:`~oncoharness.memo.ToolMemo` attached (U3: E6, opt-in), calls
+to deterministic tools are served from the content-hash cache when the same
+bytes and parameters were already computed: the call is still audited (a
+``tool_call`` plus a ``tool_result_cached`` entry citing the original
+evidence) and still metered (as a cached hit), but the tool body never runs
+— which is what makes determinism double-runs and nightly replays nearly
+free. Only this belt reads or writes the memo; it is never a tool (S8).
 """
 
 from __future__ import annotations
@@ -24,6 +32,7 @@ import numpy as np
 from .reference.detector import DoGBlobDetector
 from .reference.features import embed_crop
 from .ledger import EvidenceLedger
+from .memo import ToolMemo
 from .store import ArtifactStore
 from .telemetry import CostMeter
 
@@ -41,10 +50,12 @@ class Toolbelt:
         gate_rules_path: str | Path = "gates/gate_rules.yaml",
         meter: CostMeter | None = None,
         gate_audit_path: str | Path = "runs/gate_audit.jsonl",
+        memo: ToolMemo | None = None,
     ) -> None:
         self.store = store
         self.ledger = ledger
         self.meter = meter if meter is not None else CostMeter()
+        self.memo = memo
         self.detector = detector or DoGBlobDetector()
         # A second, differently-parameterized family for blind-spot re-search
         # (axiom A5): tuned to a different scale band and a lower floor.
@@ -76,7 +87,34 @@ class Toolbelt:
         """Single audited entry point. Unknown tools are refused loudly."""
         if tool_name not in self._registry:
             raise PermissionError(f"tool {tool_name!r} is not in the allowlist")
+        memo_key = (
+            self.memo.key(tool_name, kwargs, self.store) if self.memo is not None else None
+        )
         call_ref = self.ledger.append("tool_call", {"tool": tool_name, "args": _safe(kwargs)})
+        if memo_key is not None:
+            t0 = time.perf_counter()
+            cached = self.memo.get(memo_key)
+            if cached is not None:
+                # U3 memo hit: audited and metered like any call (so the U1
+                # invariant holds and cached_hits counts it), but the tool
+                # body never runs. The cached entry cites the original
+                # result's ledger ref, so replays and the image-ablated
+                # control can tell cached evidence from fresh (E6/S8).
+                self.meter.record_tool(
+                    tool_name, (time.perf_counter() - t0) * 1000.0, pixels=0, cached=True
+                )
+                result = cached["result"]
+                cached_ref = self.ledger.append(
+                    "tool_result_cached",
+                    {
+                        "tool": tool_name,
+                        "call_ref": call_ref,
+                        "key": memo_key,
+                        "original_ref": cached["original_ref"],
+                    },
+                )
+                result["evidence_ref"] = cached_ref
+                return result
         t0 = time.perf_counter()
         ok = False
         try:
@@ -94,6 +132,8 @@ class Toolbelt:
             "tool_result", {"tool": tool_name, "call_ref": call_ref, "result": _safe(result)}
         )
         result["evidence_ref"] = result_ref
+        if memo_key is not None:
+            self.memo.put(memo_key, result)
         return result
 
     def _detector_pixels(self, tool_name: str, kwargs: dict) -> int:
