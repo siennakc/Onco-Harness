@@ -55,12 +55,22 @@ def run_gate(
     patient_ids: list[str],
     subgroups: dict[str, list[str]] | None = None,
     candidate_scores_rerun: np.ndarray | None = None,
+    failure_bank_report=None,
+    champion_bank_vector: dict[str, bool] | None = None,
 ) -> GateResult:
     """Evaluate the conjunctive gate.
 
     ``subgroups`` maps subgroup-attribute name -> per-case values (e.g. site).
     ``candidate_scores_rerun`` is a second run on identical inputs for the
     determinism check.
+
+    Optional, additively keyed inputs (checks appear only when supplied, so
+    older callers and rule files evaluate exactly as before):
+
+    - ``failure_bank_report``: a :class:`~oncoharness.failure_bank.BankReport`
+      from replaying the bank under the candidate; gated against
+      ``champion_bank_vector`` (the champion's pass vector) with
+      ``rules["failure_bank"]["max_confirmed_regressions"]`` (default 0).
     """
     result = GateResult()
     y_true = np.asarray(y_true)
@@ -160,6 +170,18 @@ def run_gate(
                 "determinism_double_run",
                 passed=agreement >= required,
                 detail=f"agreement {agreement:.4f} >= {required}",
+            )
+        )
+
+    # 6. Failure-bank regression (U5): a confirmed record the champion
+    # passed must not fail under the candidate — the ratchet's teeth.
+    if failure_bank_report is not None:
+        from .failure_bank import gate_check_failure_bank
+
+        max_reg = int(rules.get("failure_bank", {}).get("max_confirmed_regressions", 0))
+        result.checks.append(
+            gate_check_failure_bank(
+                failure_bank_report, champion_bank_vector or {}, max_reg
             )
         )
 

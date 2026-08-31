@@ -39,3 +39,9 @@ image_dependence:
 
 deferral:
   max_rate_increase: 0.03
+
+failure_bank:
+  # Regression replay over the confirmed failure bank (U5): a confirmed
+  # record the champion passed may never fail under a candidate. Probation
+  # records never gate (mined FPs may be unreported cancers).
+  max_confirmed_regressions: 0
