@@ -24,6 +24,15 @@ Inference stack v1 (T-4.3):
 - Cost telemetry (U1: E1): ``run_case`` brackets the toolbelt's CostMeter, so
   every report carries the case's cost block — tool calls, pixels, wall time,
   LLM spend — into the ledger's ``claim`` entry.
+- Difficulty-gated lanes (U2: E3/E4/E5), strictly opt-in: with a
+  :class:`~oncoharness.router.DifficultyRouter` attached, an obvious negative
+  (no primary candidate above the lane threshold, blindspot clean) skips
+  TTA/zoom/FP-hunt outright; stages early-exit when they can no longer
+  change the decision; and the escalation adjudicator (the LLM) is invoked
+  only to rescue deferrals — through the router's circuit breaker, after the
+  distilled student (U7) had its shot. Without a router the pipeline runs
+  exactly the fixed sequence above; the conformal safety net applies to
+  every lane either way.
 """
 
 from __future__ import annotations
@@ -36,6 +45,7 @@ import numpy as np
 from .conformal import MondrianConformal
 from .reference.features import embed_crop
 from .reference.head import LogisticHead
+from .router import DifficultyRouter, Lane, RouteRecord
 from .schemas import (
     Adjudication,
     Assessment,
@@ -122,9 +132,22 @@ class HarnessPipeline:
         fp_max_aspect_ratio: float = 3.0,
         blindspot_min_score: float = 0.55,
         policy_id: str = "",
+        router: DifficultyRouter | None = None,
+        escalation_adjudicator: Adjudicator | None = None,
     ) -> None:
+        if escalation_adjudicator is not None and router is None:
+            raise ValueError(
+                "escalation_adjudicator requires a router (U2): without lanes "
+                "there is no deferral band for the LLM to rescue"
+            )
         self.tools = toolbelt
         self.adjudicator = adjudicator or RuleBasedAdjudicator()
+        # U2 cascade, opt-in: ``adjudicator`` answers the routine lane (the
+        # rule-based default), ``escalation_adjudicator`` (typically the
+        # LLM) answers only cases the router escalates. ``router is None``
+        # reproduces the pre-U2 pipeline exactly — same calls, same costs.
+        self.router = router
+        self.escalation_adjudicator = escalation_adjudicator
         self.head = head
         self.conformal = conformal
         self.consistency_reads = consistency_reads
@@ -326,13 +349,56 @@ class HarnessPipeline:
         detect = self.tools.call("run_detector", image_handle=info.handle)
         for i, cand in enumerate(detect["candidates"]):
             cand["evidence_ref"] = detect["evidence_ref"]
-        consistency = self.verify(pixels, detect["candidates"])
-
-        # Inference stack v1: clean-room zoom, then symmetric verification.
-        self.zoom_verify(info.handle, consistency["verified"])
-        self.fp_hunt(info.handle, consistency["verified"], pixel_spacing_mm)
         examined = [c["box"] for c in detect["candidates"]]
-        blindspot = self.fn_hunt(info.handle, examined)
+
+        # U2 routing: probe the blindspot early (the same call the unrouted
+        # pipeline makes later, on the same inputs) and decide the lane as a
+        # pure function of cheap features. Lane and blindspot never depend
+        # on anything the LLM said.
+        route: RouteRecord | None = None
+        blindspot: list[dict] | None = None
+        if self.router is not None:
+            blindspot = self.fn_hunt(info.handle, examined)
+            lane = self.router.route_after_detect(detect["candidates"], blindspot)
+            route = RouteRecord(case_id=case_id, lane=lane.value)
+
+        if route is not None and route.lane == Lane.fast_negative.value:
+            # Fast-negative lane (E3): skip TTA/zoom/FP-hunt entirely. The
+            # sub-threshold proposals ride along unkept so the adjudicator
+            # and report still see them; ``aggregate`` scores zero kept
+            # candidates (plus the calibrated head), and the conformal
+            # safety net below still applies — the rule-out arm is cheap,
+            # never unguarded.
+            consistency = {
+                "verified": [
+                    {
+                        "candidate_id": cand.get("candidate_id", f"c{i}"),
+                        "box": cand["box"],
+                        "score": cand["score"],
+                        "evidence_ref": cand.get("evidence_ref", ""),
+                        "reproduced": 0,
+                        "reproduced_fraction": 0.0,
+                        "kept": False,
+                    }
+                    for i, cand in enumerate(detect["candidates"])
+                ],
+                "disagreement_rate": 0.0,
+            }
+        else:
+            # Early exit (E5, routed only): zero proposals make TTA vacuous,
+            # and zoom/FP-hunt act only on kept candidates — skip stages
+            # that can no longer change the decision.
+            if self.router is not None and not detect["candidates"]:
+                consistency = {"verified": [], "disagreement_rate": 0.0}
+            else:
+                consistency = self.verify(pixels, detect["candidates"])
+
+            # Inference stack v1: clean-room zoom, then symmetric verification.
+            if self.router is None or any(c["kept"] for c in consistency["verified"]):
+                self.zoom_verify(info.handle, consistency["verified"])
+                self.fp_hunt(info.handle, consistency["verified"], pixel_spacing_mm)
+            if blindspot is None:
+                blindspot = self.fn_hunt(info.handle, examined)
 
         case_score = self.aggregate(pixels, consistency["verified"])
 
@@ -348,14 +414,55 @@ class HarnessPipeline:
             "atlas_neighbors": [],
             "guideline_notes": [],
         }
+        if route is not None:
+            request["lane"] = route.lane
         adjudication = self.adjudicator.adjudicate(request)
+        conformal_ambiguous = self.conformal is not None and self.conformal.is_ambiguous(
+            case_score
+        )
+
+        # U2/U7 escalation cascade: rules -> distilled student -> LLM. The
+        # escalation decision is a pure function; the LLM is reached only
+        # through the router's circuit breaker, and a case denied by the cap
+        # keeps its rule verdict (never a truncated half-answer).
+        if route is not None:
+            route.escalation_wanted = self.router.escalate_to_llm(
+                adjudication, conformal_ambiguous, blindspot
+            )
+            if route.escalation_wanted:
+                student = self.router.student_verdict(request)
+                if student is not None:
+                    decision, confidence = student
+                    route.student_absorbed = True
+                    adjudication = Adjudication(
+                        per_candidate=adjudication.per_candidate,
+                        decision=decision,
+                        rationale=(
+                            f"distilled student verdict at confidence {confidence:.3f} "
+                            "(at or above the promoted threshold)"
+                        ),
+                        cited_evidence=adjudication.cited_evidence,
+                    )
+                elif self.escalation_adjudicator is not None:
+                    if self.router.admit_llm():
+                        route.lane = Lane.hard.value
+                        route.llm_invoked = True
+                        request["lane"] = route.lane
+                        adjudication = self.escalation_adjudicator.adjudicate(request)
+                    else:
+                        route.llm_denied_by_cap = True
+            # Routing telemetry: one typed ledger entry per routed case, so
+            # lane mix and escalation outcomes are auditable per run (S8:
+            # written by code, never a registered tool).
+            self.tools.ledger.append("route", route.as_dict())
 
         # Conformal policy layer (A13): an ambiguous or empty prediction set
-        # overrides any confident-sounding decision with deferral.
+        # overrides any confident-sounding decision with deferral — over
+        # every lane, the LLM's and the student's verdicts included.
         if (
             self.conformal is not None
             and adjudication.decision != CaseDecision.defer_to_human
-            and self.conformal.is_ambiguous(case_score)
+            and conformal_ambiguous
         ):
             pset = sorted(self.conformal.predict_set(case_score))
             adjudication = Adjudication(
@@ -411,6 +518,7 @@ class HarnessPipeline:
             case_id=case_id,
             policy_id=self.policy_id,
             qc=qc,
+            lane=route.lane if route is not None else "",
             findings=findings,
             decision=adjudication.decision,
             score=case_score,

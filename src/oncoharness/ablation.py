@@ -80,6 +80,36 @@ def run_arm_harness(
     return np.array(scores), costs
 
 
+def run_arm_harness_routed(
+    cases: list[PhantomCase], workdir: str | None = None
+) -> tuple[np.ndarray, list[dict]]:
+    """Arm 3 (U2): the same harness behind the difficulty router.
+
+    Identical stack and thresholds as :func:`run_arm_harness`, plus a
+    :class:`~oncoharness.router.RouterConfig` with its fast lane calibrated
+    to the reference detector's score scale on phantoms (the DoG runs hot on
+    textured backgrounds: negatives top out near 0.5, where calibrated real
+    scores would sit near the 0.2 default) — so the delta between the two
+    arms is exactly what difficulty gating buys, accuracy and cost side by
+    side (E2/E3).
+    """
+    from .router import DifficultyRouter, RouterConfig
+
+    root = workdir or tempfile.mkdtemp(prefix="oncoharness_ablation_routed_")
+    pipeline = HarnessPipeline(
+        Toolbelt(ArtifactStore(f"{root}/artifacts"), EvidenceLedger(f"{root}/ledger.jsonl")),
+        consistency_reads=3,
+        min_reproduced=2,
+        router=DifficultyRouter(RouterConfig(fast_negative_max_score=0.5)),
+    )
+    scores, costs = [], []
+    for case in cases:
+        report = pipeline.run_case(case.case_id, case.pixels)
+        scores.append(report.score)
+        costs.append(report.cost or {})
+    return np.array(scores), costs
+
+
 def detector_alone_scores(cases: list[PhantomCase]) -> np.ndarray:
     """Back-compat wrapper: scores only."""
     return run_arm_detector_alone(cases)[0]
@@ -100,6 +130,7 @@ def run_ablation(cases: list[PhantomCase]) -> list[ArmResult]:
     for arm, (scores, costs) in (
         ("detector_alone", run_arm_detector_alone(cases)),
         ("harness", run_arm_harness(cases)),
+        ("harness_routed", run_arm_harness_routed(cases)),
     ):
         results.append(
             ArmResult(

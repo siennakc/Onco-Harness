@@ -57,7 +57,9 @@ class PolicyConfig(BaseModel):
         description="HarnessPipeline knobs: consistency_reads, min_reproduced, zoom_*, ...",
     )
     router: dict[str, Any] = Field(
-        default_factory=dict, description="difficulty-router settings (U2; empty until built)"
+        default_factory=dict,
+        description="difficulty-router knobs (U2), incl. the student band (U7); "
+        "empty = no router",
     )
     adjudicator: dict[str, Any] = Field(
         default_factory=dict, description="kind: rule|llm plus that adjudicator's parameters"
@@ -253,13 +255,25 @@ class PolicyRegistry:
         return self.lineage_ledger.verify_chain()
 
 
-def pipeline_from_policy(cfg: PolicyConfig, toolbelt, head=None, conformal=None):
+def pipeline_from_policy(
+    cfg: PolicyConfig, toolbelt, head=None, conformal=None, student=None,
+    escalation_adjudicator=None,
+):
     """Instantiate a :class:`~oncoharness.state_machine.HarnessPipeline` from a policy.
 
     This is the S9 boundary made executable: only knobs the pipeline and
     adjudicator declare are accepted, so a "policy" can never smuggle in
     behavior outside the registered family. Reports produced by the
     returned pipeline are stamped with ``cfg.policy_id()`` (S2).
+
+    ``cfg.router`` (U2) is validated against :class:`~oncoharness.router.RouterConfig`
+    the same way; an empty dict means no router and the exact pre-U2
+    pipeline. ``student`` (U7) is accepted only when the policy registers a
+    ``student_id`` — and the router refuses one whose content hash does not
+    match — so adopting or swapping a student is always a visible, gated
+    policy change, never a keyword argument. ``escalation_adjudicator`` (the
+    LLM node) is wired by the runtime, like the LLM adjudicator itself: it
+    holds no tunable state of its own beyond what its policy registers.
     """
     import inspect
 
@@ -294,11 +308,38 @@ def pipeline_from_policy(cfg: PolicyConfig, toolbelt, head=None, conformal=None)
         adj_cfg["deferral_band"] = tuple(adj_cfg["deferral_band"])
     adjudicator = RuleBasedAdjudicator(**adj_cfg)
 
+    router = None
+    if cfg.router:
+        from .router import ROUTER_KNOBS, DifficultyRouter, RouterConfig
+
+        unknown_router = set(cfg.router) - ROUTER_KNOBS
+        if unknown_router:
+            raise ValueError(
+                f"policy {cfg.policy_id()} names unknown router knob(s) "
+                f"{sorted(unknown_router)}; the reachable family is {sorted(ROUTER_KNOBS)}"
+            )
+        rcfg = RouterConfig(**cfg.router)
+        if rcfg.student_id and student is None:
+            raise ValueError(
+                f"policy {cfg.policy_id()} registers student {rcfg.student_id!r} but "
+                "none was provided; the promoted policy must run whole (U7)"
+            )
+        # DifficultyRouter itself enforces the student_id content-hash match
+        # and refuses a student the policy never registered.
+        router = DifficultyRouter(rcfg, student=student)
+    elif student is not None:
+        raise ValueError(
+            f"policy {cfg.policy_id()} has no router config; a student may only "
+            "ride a registered routing policy (U7 promotion goes through the gate)"
+        )
+
     return HarnessPipeline(
         toolbelt,
         adjudicator=adjudicator,
         head=head,
         conformal=conformal,
         policy_id=cfg.policy_id(),
+        router=router,
+        escalation_adjudicator=escalation_adjudicator if router is not None else None,
         **cfg.pipeline,
     )

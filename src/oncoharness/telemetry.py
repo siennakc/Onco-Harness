@@ -29,7 +29,7 @@ class CaseCost:
     """What one case actually cost. Zeros mean "none observed", never "unknown"."""
 
     tool_calls: dict[str, int] = field(default_factory=dict)  # tool name -> count
-    cached_hits: int = 0        # memo hits (stays 0 until tool memoization lands)
+    cached_hits: int = 0        # tool-memo hits (U3): calls served without running the body
     detector_pixels: int = 0    # sum(h*w) over detector inputs
     wall_ms: float = 0.0        # whole-case wall time, start_case -> finish_case
     tool_wall_ms: float = 0.0   # time spent inside tool bodies alone
