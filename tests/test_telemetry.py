@@ -135,6 +135,37 @@ def test_ablation_table_includes_cost_columns():
     assert by_arm["harness"].mean_llm_usd == 0.0  # no LLM in the rule-based arms
 
 
+def test_llm_usage_lands_in_cost_block(tmp_path, monkeypatch):
+    """U1 spec test 2: an LLM arm with a mocked SDK result meters its spend."""
+    from fake_sdk import FakeSDK, good_result
+
+    from oncoharness import agent as agent_mod
+
+    fake = FakeSDK(
+        script=[[good_result(
+            usage={"input_tokens": 1200, "output_tokens": 90, "cache_read_input_tokens": 800},
+            usd=0.021,
+            turns=4,
+        )]]
+    )
+    monkeypatch.setattr(agent_mod, "_require_sdk", lambda: fake)
+    tb = Toolbelt(ArtifactStore(tmp_path / "artifacts"), EvidenceLedger(tmp_path / "ledger.jsonl"))
+    pipeline = HarnessPipeline(
+        tb,
+        adjudicator=agent_mod.LLMAdjudicator(tb),
+        consistency_reads=3,
+        min_reproduced=2,
+    )
+    case = generate_dataset(n_patients=1, images_per_patient=1, prevalence=1.0, seed=5)[0]
+    report = pipeline.run_case(case.case_id, case.pixels)
+    assert report.cost["llm_input_tokens"] == 1200
+    assert report.cost["llm_output_tokens"] == 90
+    assert report.cost["llm_cache_read_tokens"] == 800
+    assert report.cost["llm_usd"] == 0.021
+    assert report.cost["llm_turns"] == 4
+    assert report.cost["total_tool_calls"] > 0  # deterministic stages still counted
+
+
 def test_efficiency_summary_per_unit_costs():
     y = np.array([0, 0, 0, 0, 1, 1])
     scores = np.array([0.1, 0.2, 0.3, 0.4, 0.8, 0.9])
